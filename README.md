@@ -12,3 +12,12 @@ Copy
 docker/<endpoint_name>/<container_name>/state
 docker/<endpoint_name>/<container_name>/cpu_percent
 docker/<endpoint_name>/<container_name>/memory_percent
+
+
+The key changes:
+
+    Added MQTT discovery support - sensors will now automatically appear in Home Assistant
+    No configuration.yaml changes needed
+    Added proper device grouping in Home Assistant
+    Added icons and unit measurements
+    Added state classes for proper history tracking
