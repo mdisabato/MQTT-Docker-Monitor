@@ -43,3 +43,29 @@ Using the Portainer API instead (as in this solution) is generally more secure s
     It doesn't require exposing the Docker daemon directly
 
 
+The script talks to the main Portainer instance only. The Portainer server then communicates with the agents on your behalf. This is actually one of the advantages - you only need to configure one connection to your Portainer server, and it handles all the agent communication for you.
+
+This works because when you call the Portainer API with an endpoint ID, Portainer routes that request through its existing connection to the appropriate agent. You can see this in the code where we use endpoints:
+
+    First we get all endpoints from Portainer:
+
+python
+Copy
+def get_endpoints(self) -> list:
+    response = requests.get(f"{self.portainer_url}/api/endpoints", 
+                          headers=self.headers)
+
+    Then for each endpoint, we make requests that include the endpoint ID:
+
+python
+Copy
+def get_containers(self, endpoint_id: int) -> list:
+    response = requests.get(
+        f"{self.portainer_url}/api/endpoints/{endpoint_id}/docker/containers/json?all=true",
+        headers=self.headers
+    )
+
+All the actual agent communication is handled by your existing Portainer infrastructure.
+
+
+
