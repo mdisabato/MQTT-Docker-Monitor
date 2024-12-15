@@ -36,3 +36,10 @@ rest_command:
     url: "http://your-script-host:port/container/{{ endpoint }}/{{ container }}/{{ action }}"
     method: POST
 
+Using the Portainer API instead (as in this solution) is generally more secure since:
+
+    It's already running in your environment
+    It has built-in authentication
+    It doesn't require exposing the Docker daemon directly
+
+
