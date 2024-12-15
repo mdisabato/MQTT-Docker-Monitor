@@ -1,0 +1,38 @@
+pip install requests paho-mqtt
+
+Environment Variables
+export PORTAINER_URL="http://your-portainer:9000"
+export PORTAINER_API_KEY="your-api-key"
+export MQTT_HOST="your-mqtt-broker"
+# Optional vars:
+export MQTT_USER="username"
+export MQTT_PASS="password"
+export UPDATE_INTERVAL="60"
+
+
+    In Home Assistant, add MQTT sensors:
+
+yaml
+Copy
+mqtt:
+  sensor:
+    - name: "Container State"
+      state_topic: "docker/+/+/state"
+      value_template: "{{ value_json }}"
+    - name: "Container CPU"
+      state_topic: "docker/+/+/cpu_percent"
+      unit_of_measurement: "%"
+    - name: "Container Memory"
+      state_topic: "docker/+/+/memory_percent"
+      unit_of_measurement: "%"
+
+
+    For container actions, you can add REST commands in Home Assistant:
+
+yaml
+Copy
+rest_command:
+  docker_container_action:
+    url: "http://your-script-host:port/container/{{ endpoint }}/{{ container }}/{{ action }}"
+    method: POST
+
