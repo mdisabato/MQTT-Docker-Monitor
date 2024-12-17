@@ -4,7 +4,7 @@ import time
 import paho.mqtt.client as mqtt
 from typing import Dict, Any
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 import logging
 import sys
 
@@ -19,24 +19,15 @@ class PortainerMonitor:
             'Content-Type': 'application/json'
         }
         
-        # Setup logging
-        logging.basicConfig(
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            level=logging.INFO,
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
-        
         # Store MQTT connection details
         self.mqtt_host = mqtt_host
         self.mqtt_port = mqtt_port
         self.mqtt_user = mqtt_user
         self.mqtt_pass = mqtt_pass
+        self.connected = False
         
         # Discovery prefix for Home Assistant
         self.discovery_prefix = 'homeassistant'
-        
-        # Endpoint health tracking
-        self.endpoint_health = {}
         
         # Initialize MQTT client
         self.setup_mqtt()
@@ -46,31 +37,54 @@ class PortainerMonitor:
         retry_count = 0
         while retry_count < max_retries:
             try:
-                logging.info(f"Attempting to connect to MQTT broker at {self.mqtt_host}:{self.mqtt_port}")
+                logging.info(f"Connecting to MQTT broker at {self.mqtt_host}")
                 self.mqtt_client = mqtt.Client()
                 
+                # Setup callbacks
+                self.mqtt_client.on_connect = self.on_connect
+                self.mqtt_client.on_disconnect = self.on_disconnect
+                
                 if self.mqtt_user and self.mqtt_pass:
-                    logging.info("Configuring MQTT authentication")
+                    logging.debug("Configuring MQTT authentication")
                     self.mqtt_client.username_pw_set(self.mqtt_user, self.mqtt_pass)
                 
                 self.mqtt_client.connect(self.mqtt_host, self.mqtt_port)
                 self.mqtt_client.loop_start()
-                logging.info("Successfully connected to MQTT broker")
+                
+                # Wait for connection to be established
+                wait_count = 0
+                while not self.connected and wait_count < 10:
+                    time.sleep(1)
+                    wait_count += 1
+                    
+                if not self.connected:
+                    raise Exception("Timed out waiting for MQTT connection")
+                    
                 return
-            
+                
             except Exception as e:
                 retry_count += 1
                 if retry_count < max_retries:
-                    logging.error(f"Failed to connect to MQTT broker: {str(e)}")
-                    logging.info(f"Retrying in {retry_delay} seconds... (Attempt {retry_count+1}/{max_retries})")
+                    logging.error(f"MQTT connection failed: {str(e)}")
+                    logging.info(f"Retrying in {retry_delay} seconds (Attempt {retry_count+1}/{max_retries})")
                     time.sleep(retry_delay)
                 else:
-                    logging.critical(f"Failed to connect to MQTT broker after {max_retries} attempts")
-                    logging.error(f"Please check your MQTT broker settings:")
-                    logging.error(f"Host: {self.mqtt_host}")
-                    logging.error(f"Port: {self.mqtt_port}")
-                    logging.error(f"User: {self.mqtt_user if self.mqtt_user else 'Not set'}")
+                    logging.critical("Failed to connect to MQTT after multiple attempts")
                     sys.exit(1)
+
+    def on_connect(self, client, userdata, flags, rc):
+        """Callback when MQTT connects."""
+        if rc == 0:
+            self.connected = True
+            logging.info("MQTT connection established")
+        else:
+            logging.error(f"MQTT connection failed with code {rc}")
+
+    def on_disconnect(self, client, userdata, rc):
+        """Callback when MQTT disconnects."""
+        self.connected = False
+        if rc != 0:
+            logging.warning("Unexpected MQTT disconnection")
 
     def get_endpoints(self) -> list:
         """Get all Portainer endpoints (Docker hosts)."""
@@ -79,44 +93,11 @@ class PortainerMonitor:
                                 headers=self.headers)
             response.raise_for_status()
             endpoints = response.json()
-            logging.info(f"Successfully retrieved {len(endpoints)} endpoints from Portainer")
+            logging.debug(f"Retrieved {len(endpoints)} endpoints from Portainer")
             return endpoints
         except requests.exceptions.RequestException as e:
-            logging.error(f"Error getting endpoints: {str(e)}")
+            logging.error(f"Failed to get endpoints: {str(e)}")
             return []
-
-    def update_endpoint_health(self, endpoint_id: int, endpoint_name: str, success: bool):
-        """Track endpoint health status."""
-        now = datetime.now()
-        
-        if endpoint_id not in self.endpoint_health:
-            self.endpoint_health[endpoint_id] = {
-                'name': endpoint_name,
-                'failures': 0,
-                'last_success': now if success else None,
-                'first_failure': now if not success else None
-            }
-        
-        if success:
-            if self.endpoint_health[endpoint_id]['failures'] > 0:
-                logging.info(f"Endpoint {endpoint_name} (ID: {endpoint_id}) has recovered after "
-                           f"{self.endpoint_health[endpoint_id]['failures']} failures")
-            self.endpoint_health[endpoint_id]['failures'] = 0
-            self.endpoint_health[endpoint_id]['last_success'] = now
-            self.endpoint_health[endpoint_id]['first_failure'] = None
-        else:
-            if self.endpoint_health[endpoint_id]['failures'] == 0:
-                self.endpoint_health[endpoint_id]['first_failure'] = now
-            self.endpoint_health[endpoint_id]['failures'] += 1
-            
-            # Alert if endpoint has been failing for more than 1 hour
-            if (self.endpoint_health[endpoint_id]['first_failure'] and 
-                now - self.endpoint_health[endpoint_id]['first_failure'] > timedelta(hours=1)):
-                logging.warning(
-                    f"Endpoint {endpoint_name} (ID: {endpoint_id}) has been failing for over an hour. "
-                    f"Total failures: {self.endpoint_health[endpoint_id]['failures']}. "
-                    f"Last success: {self.endpoint_health[endpoint_id]['last_success']}"
-                )
 
     def get_containers(self, endpoint_id: int, endpoint_name: str) -> list:
         """Get all containers for a specific endpoint."""
@@ -127,11 +108,10 @@ class PortainerMonitor:
             )
             response.raise_for_status()
             containers = response.json()
-            self.update_endpoint_health(endpoint_id, endpoint_name, True)
+            logging.debug(f"Retrieved {len(containers)} containers from {endpoint_name}")
             return containers
         except requests.exceptions.RequestException as e:
-            logging.error(f"Error getting containers for endpoint {endpoint_id} ({endpoint_name}): {str(e)}")
-            self.update_endpoint_health(endpoint_id, endpoint_name, False)
+            logging.error(f"Failed to get containers from {endpoint_name}: {str(e)}")
             return []
 
     def get_container_stats(self, endpoint_id: int, container_id: str) -> Dict[str, Any]:
@@ -144,7 +124,6 @@ class PortainerMonitor:
             response.raise_for_status()
             stats = response.json()
             
-            # Calculate CPU percentage
             cpu_delta = stats['cpu_stats']['cpu_usage']['total_usage'] - \
                        stats['precpu_stats']['cpu_usage']['total_usage']
             system_delta = stats['cpu_stats']['system_cpu_usage'] - \
@@ -154,7 +133,6 @@ class PortainerMonitor:
             if system_delta > 0:
                 cpu_percent = (cpu_delta / system_delta) * 100.0
 
-            # Calculate memory percentage
             mem_percent = (stats['memory_stats']['usage'] / stats['memory_stats']['limit']) * 100.0
 
             return {
@@ -162,7 +140,7 @@ class PortainerMonitor:
                 'memory_percent': round(mem_percent, 2)
             }
         except Exception as e:
-            logging.error(f"Error getting container stats: {str(e)}")
+            logging.error(f"Failed to get container stats: {str(e)}")
             return {
                 'cpu_percent': 0.0,
                 'memory_percent': 0.0
@@ -170,20 +148,30 @@ class PortainerMonitor:
 
     def publish_discovery_config(self, endpoint_name: str, container_name: str):
         """Publish MQTT discovery configuration for Home Assistant."""
+        logging.debug(f"Creating discovery config for {container_name} on {endpoint_name}")
+        
+        # Clean up names
+        clean_container = container_name.replace('-', '_').replace('.', '_').lstrip('/')
+        clean_endpoint = endpoint_name.replace('-', '_').replace('.', '_')
+        
+        # Create identifiers
+        host_id = f"{clean_endpoint}_docker"
+        entity_id = f"{clean_endpoint}_docker_{clean_container}"
+        
+        # Create device info for the Docker host
         device_info = {
-            "identifiers": [f"docker_{endpoint_name}_{container_name}"],
-            "name": f"Docker {container_name}",
+            "identifiers": [host_id],
+            "name": f"{endpoint_name} Docker",
             "manufacturer": "Docker",
-            "model": "Container",
-            "via_device": f"docker_{endpoint_name}"
+            "model": "Host",
         }
 
         # Define the single sensor with all attributes
-        discovery_topic = f"{self.discovery_prefix}/sensor/{endpoint_name}_{container_name}/config"
+        discovery_topic = f"{self.discovery_prefix}/sensor/{entity_id}/config"
         
         payload = {
             "name": f"{container_name}",
-            "unique_id": f"docker_{endpoint_name}_{container_name}",
+            "unique_id": entity_id,
             "state_topic": f"docker/{endpoint_name}/{container_name}/state",
             "icon": "mdi:docker",
             "device": device_info,
@@ -191,19 +179,15 @@ class PortainerMonitor:
             "value_template": "{{ value_json.state }}"
         }
 
-        self.mqtt_client.publish(discovery_topic, json.dumps(payload), retain=True)
-
-    def publish_container_data(self, endpoint_name: str, container_name: str, data: Dict[str, Any]):
-        """Publish container data to MQTT."""
-        base_topic = f"docker/{endpoint_name}/{container_name}"
-        
-        # Publish each metric separately
-        for key, value in data.items():
-            self.mqtt_client.publish(f"{base_topic}/{key}", value)
+        result = self.mqtt_client.publish(discovery_topic, json.dumps(payload), retain=True)
+        if result.rc != mqtt.MQTT_ERR_SUCCESS:
+            logging.error(f"Failed to publish discovery config: {mqtt.error_string(result.rc)}")
+        else:
+            logging.debug(f"Published discovery config for {container_name}")
 
     def monitor_loop(self, interval: int = 60):
         """Main monitoring loop."""
-        logging.info("Starting monitoring loop...")
+        logging.info("Starting monitoring loop")
         while True:
             try:
                 endpoints = self.get_endpoints()
@@ -212,21 +196,19 @@ class PortainerMonitor:
                     endpoint_name = endpoint.get('Name', f"Unknown-{endpoint['Id']}")
                     containers = self.get_containers(endpoint['Id'], endpoint_name)
                     
-                    if containers:
-                        logging.info(f"Successfully retrieved {len(containers)} containers from {endpoint_name}")
-                    
                     for container in containers:
                         container_name = container['Names'][0].lstrip('/')
+                        logging.debug(f"Processing {container_name} on {endpoint_name}")
                         
                         # Publish discovery configuration
                         self.publish_discovery_config(endpoint['Name'], container_name)
                         
-                        # Build the state message
+                        # State message - just the running state
                         state_data = {
-                            "state": container['State'],
+                            "state": container['State']
                         }
 
-                        # Build the attributes message
+                        # Attributes message - all the details
                         attributes = {
                             "status": container['Status'],
                             "last_updated": datetime.now().isoformat()
@@ -238,7 +220,7 @@ class PortainerMonitor:
                                 stats = self.get_container_stats(endpoint['Id'], container['Id'])
                                 attributes.update(stats)
                             except Exception as e:
-                                logging.error(f"Error getting stats for {container_name}: {str(e)}")
+                                logging.error(f"Failed to get stats for {container_name}: {str(e)}")
                         
                         # Publish state and attributes
                         base_topic = f"docker/{endpoint['Name']}/{container_name}"
@@ -261,23 +243,30 @@ def validate_environment():
     missing_vars = [var for var, value in required_vars.items() if not value]
     
     if missing_vars:
-        logging.error("Error: Missing required environment variables:")
+        logging.error("Missing required environment variables:")
         for var in missing_vars:
             logging.error(f"- {var}")
-        logging.info("\nPlease set the following environment variables:")
+        logging.info("\nRequired environment variables:")
         logging.info("export PORTAINER_URL='http://your-portainer:9000'")
         logging.info("export PORTAINER_API_KEY='your-api-key'")
         logging.info("export MQTT_HOST='your-mqtt-broker'")
-        logging.info("Optional variables:")
+        logging.info("\nOptional variables:")
         logging.info("export MQTT_PORT='1883'")
         logging.info("export MQTT_USER='your-username'")
         logging.info("export MQTT_PASS='your-password'")
         logging.info("export UPDATE_INTERVAL='60'")
+        logging.info("export DEBUG='true'")
         sys.exit(1)
 
 if __name__ == "__main__":
-    print(f"Running script from: {__file__}")
-    
+    # Set up logging based on DEBUG environment variable
+    log_level = logging.DEBUG if os.getenv('DEBUG', '').lower() == 'true' else logging.INFO
+    logging.basicConfig(
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        level=log_level,
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
     # Validate environment variables
     validate_environment()
     
@@ -302,5 +291,5 @@ if __name__ == "__main__":
         
         monitor.monitor_loop(UPDATE_INTERVAL)
     except KeyboardInterrupt:
-        logging.info("\nShutting down...")
+        logging.info("Shutting down...")
         sys.exit(0)
